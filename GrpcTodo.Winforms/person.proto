@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+option csharp_namespace = "People.Protos";
+
+package people;
+
+message Person {
+  int64 id = 1;
+  string name = 2;
+  string surname = 3;
+  int32 age = 4;
+  string dateOfBirth = 5;
+}
+
+message Id { int64 id = 1; }
+message Empty {}
+
+message PersonList { repeated Person people = 1; }
+message OperationResult { bool success = 1; string message = 2; }
+
+service PersonService {
+  rpc Create(Person) returns (Person);
+  rpc Read(Id) returns (Person);
+  rpc Update(Person) returns (OperationResult);
+  rpc Delete(Id) returns (OperationResult);
+  rpc List(Empty) returns (PersonList);
+}

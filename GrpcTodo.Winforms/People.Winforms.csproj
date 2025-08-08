@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Net.Client" Version="2.71.0" />
+  </ItemGroup>
+	
+	<ItemGroup>
+		<Protobuf Include="C:\Users\n.athanasiou\source\repos\GrpcTodo.Service\GrpcTodo.Service\Protos\person.proto" GrpcServices="Client" />
+	</ItemGroup>
+<ItemGroup>
+  <PackageReference Include="Grpc.Net.Client" Version="2.52.0" />
+  <PackageReference Include="Grpc.Tools" Version="2.52.0" PrivateAssets="All" />
+  <PackageReference Include="Google.Protobuf" Version="3.21.12" />
+</ItemGroup>
+
+
+</Project>
