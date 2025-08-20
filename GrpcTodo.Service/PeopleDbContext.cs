@@ -7,17 +7,31 @@ public class PeopleContext : DbContext
     {
     }
     public DbSet<PersonEntity> People { get; set; }
+    public DbSet<UserEntity> Users { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        // Map PersonEntity
         modelBuilder.Entity<PersonEntity>(entity =>
         {
-            entity.ToTable("Person"); // Table name matches your DB
+            entity.ToTable("Person");
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Name).IsRequired();
             entity.Property(e => e.Surname).IsRequired();
             entity.Property(e => e.Age).IsRequired();
             entity.Property(e => e.DateOfBirth).IsRequired();
         });
+
+        // Map UserEntity
+        modelBuilder.Entity<UserEntity>(entity =>
+        {
+            entity.ToTable("Users");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Username).IsRequired();
+            entity.Property(e => e.PasswordHash).IsRequired();
+            entity.Property(e => e.Role).IsRequired();
+            entity.Property(e => e.CreatedAt).IsRequired();
+        });
     }
+
 }

@@ -1,7 +1,8 @@
-using Grpc.Net.Client;
+﻿using Grpc.Net.Client;
 using People.Protos;
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -12,13 +13,34 @@ namespace People.Winforms
     {
         private Dictionary<long, Person> _personMap = new Dictionary<long, Person>();
         private PersonService.PersonServiceClient _client;
-
-        // To keep track of the currently selected person's Id
         private long? _currentSelectedPersonId = null;
+        private bool darkMode = false;
+        //stacks for undo / redo
+        private readonly Stack<PersonAction> undoStack = new Stack<PersonAction>();
+        private readonly Stack<PersonAction> redoStack = new Stack<PersonAction>();
+
+        //for user management
+        private string _role;
+
+
+        // Store original colors for restore
+        private Dictionary<Control, (Color BackColor, Color ForeColor)> originalColors
+            = new Dictionary<Control, (Color, Color)>();
+
+        private const int DebounceDelayMs = 300;
+        //greek-english toggle
+        private bool isGreek = false; // default Αγγλικά
+
 
         public Form1()
         {
             InitializeComponent();
+            ApplyButtonStyles();
+            SaveOriginalColors(this);
+
+            // Subscribe to form events
+            Load += Form1_Load;
+
 
             var channel = GrpcChannel.ForAddress("http://localhost:5000");
             _client = new PersonService.PersonServiceClient(channel);
@@ -30,41 +52,131 @@ namespace People.Winforms
             listViewPeople.Columns.Add("Age", 50, HorizontalAlignment.Center);
             listViewPeople.Columns.Add("Date of Birth", 100, HorizontalAlignment.Left);
 
-            // Attach event handler to the existing TextBox from Designer
-            txtSearchSurname.TextChanged += txtSearchSurname_TextChanged;
+            // Setup debounce timer for search
+            searchDebounceTimer.Interval = DebounceDelayMs;
+            searchDebounceTimer.Tick += SearchDebounceTimer_Tick;
+
+            // Hook search TextChanged to debounced handler
+            txtSearchSurname.TextChanged += TxtSearchSurname_TextChanged_Debounced;
+
             listViewPeople.SelectedIndexChanged += listViewPeople_SelectedIndexChanged;
+
+            // Setup DateTimePicker
+            dtpDOB.MinDate = new DateTime(1900, 1, 1);
+            dtpDOB.MaxDate = DateTime.Today;
+            dtpDOB.ValueChanged += dtpDOB_ValueChanged;
+
+        }
+
+        public Form1(string role) : this()  // Calls default constructor to keep all existing initialization
+        {
+            _role = role;
+
+            // Set visibility of buttons based on role
+            bool isAdmin = _role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+            btnCreate.Visible = isAdmin;
+            btnUpdate.Visible = isAdmin;
+            btnDelete.Visible = isAdmin;
         }
 
         private async void Form1_Load(object sender, EventArgs e)
         {
-            numAge.Items.AddRange(Enumerable.Range(1, 100).Cast<object>().ToArray());
-            numAge.SelectedIndex = 0;
+            UpdateListViewColumns();
 
-            await LoadPeopleAsync(); // Load all people initially
+            try
+            {
+                // Load your people list after form is ready
+                await LoadPeopleAsync();
+
+                // Set default DateTimePicker
+                dtpDOB.Value = DateTime.Today;
+                lblAgeValue.Text = "";
+
+                ApplyTheme();  // Apply dark/light theme safely at runtime
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error loading data: " + ex.Message);
+            }
         }
-
-        private void ClearInputs()
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            txtName.Clear();
-            txtSurname.Clear();
-            numAge.SelectedIndex = 0;
-            dtpDOB.Value = DateTime.Today;
-            // Don't clear txtSearchSurname here as user might want to keep search text
-            listViewPeople.SelectedItems.Clear();
-            _currentSelectedPersonId = null;
+            // Dispose of any timers or resources safely
+            searchDebounceTimer?.Stop();
+            searchDebounceTimer?.Dispose();
         }
 
-        private async Task<List<Person>> LoadPeopleAsync(string? surnameFilter = null)
+        private void SaveOriginalColors(Control parent)
+        {
+            originalColors[parent] = (parent.BackColor, parent.ForeColor);
+
+            foreach (Control child in parent.Controls)
+            {
+                SaveOriginalColors(child);
+            }
+        }
+
+        private void ApplyTheme()
+        {
+            if (darkMode)
+            {
+                this.BackColor = Color.FromArgb(45, 45, 48);
+                ForeColor = Color.White;
+                SetControlDark(this);
+                btnToggleTheme.Text = "Light Mode";
+            }
+            else
+            {
+                // Restore original colors
+                foreach (var kvp in originalColors)
+                {
+                    kvp.Key.BackColor = kvp.Value.BackColor;
+                    kvp.Key.ForeColor = kvp.Value.ForeColor;
+                }
+                btnToggleTheme.Text = "Dark Mode";
+            }
+        }
+
+        private void SetControlDark(Control ctrl)
+        {
+            ctrl.BackColor = Color.FromArgb(45, 45, 48);
+            ctrl.ForeColor = Color.White;
+
+            if (ctrl is ListView lv)
+            {
+                lv.BackColor = Color.FromArgb(30, 30, 30);
+                lv.ForeColor = Color.White;
+            }
+
+            foreach (Control child in ctrl.Controls)
+            {
+                SetControlDark(child);
+            }
+        }
+
+        private void btnToggleTheme_Click(object sender, EventArgs e)
+        {
+            darkMode = !darkMode;
+            ApplyTheme();
+        }
+
+
+
+        private async Task<List<Person>> LoadPeopleAsync(string? filterText = null)
         {
             try
             {
                 var list = await _client.ListAsync(new People.Protos.Empty());
-
                 listViewPeople.Items.Clear();
 
-                var filteredPeople = string.IsNullOrWhiteSpace(surnameFilter)
-                    ? list.People.ToList()
-                    : list.People.Where(p => p.Surname.StartsWith(surnameFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+                IEnumerable<Person> filteredPeople = list.People;
+
+                if (!string.IsNullOrWhiteSpace(filterText))
+                {
+                    filteredPeople = rbSearchByName.Checked
+                        ? list.People.Where(p => p.Name.StartsWith(filterText, StringComparison.OrdinalIgnoreCase))
+                        : list.People.Where(p => p.Surname.StartsWith(filterText, StringComparison.OrdinalIgnoreCase));
+                }
 
                 foreach (var p in filteredPeople)
                 {
@@ -77,7 +189,7 @@ namespace People.Winforms
                     listViewPeople.Items.Add(item);
                 }
 
-                return filteredPeople;
+                return filteredPeople.ToList();
             }
             catch (Exception ex)
             {
@@ -86,15 +198,17 @@ namespace People.Winforms
             }
         }
 
-        private async void btnList_Click(object sender, EventArgs e)
+        private void TxtSearchSurname_TextChanged_Debounced(object sender, EventArgs e)
         {
-            await LoadPeopleAsync();
+            searchDebounceTimer.Stop();
+            searchDebounceTimer.Start();
         }
 
-        private async void txtSearchSurname_TextChanged(object sender, EventArgs e)
+        private async void SearchDebounceTimer_Tick(object? sender, EventArgs e)
         {
-            var searchText = txtSearchSurname.Text.Trim();
+            searchDebounceTimer.Stop();
 
+            string searchText = txtSearchSurname.Text.Trim();
             var filteredPeople = await LoadPeopleAsync(searchText);
 
             if (_currentSelectedPersonId.HasValue)
@@ -102,9 +216,7 @@ namespace People.Winforms
                 bool isStillPresent = filteredPeople.Any(p => p.Id == _currentSelectedPersonId.Value);
 
                 if (isStillPresent)
-                {
                     SelectPersonInListView(_currentSelectedPersonId.Value);
-                }
                 else
                 {
                     listViewPeople.SelectedItems.Clear();
@@ -132,22 +244,27 @@ namespace People.Winforms
             if (listViewPeople.SelectedItems.Count == 0)
                 return;
 
-            var selectedIdText = listViewPeople.SelectedItems[0].Text;
-            if (!long.TryParse(selectedIdText, out long selectedId))
+            if (!long.TryParse(listViewPeople.SelectedItems[0].Text, out long selectedId))
                 return;
 
             try
             {
                 var person = await _client.ReadAsync(new Id { Id_ = selectedId });
-
-                _currentSelectedPersonId = selectedId; // Remember current selection
-
-                // Don't modify txtSearchSurname to preserve user search input
+                _currentSelectedPersonId = selectedId;
 
                 txtName.Text = person.Name;
                 txtSurname.Text = person.Surname;
-                numAge.Text = person.Age.ToString();
-                dtpDOB.Text = person.DateOfBirth;
+
+                if (DateTime.TryParse(person.DateOfBirth, out DateTime dob))
+                {
+                    dtpDOB.Value = dob;
+                    UpdateAgeLabel(dob);
+                }
+                else
+                {
+                    dtpDOB.Value = DateTime.Today;
+                    lblAgeValue.Text = "";
+                }
             }
             catch (Exception ex)
             {
@@ -155,8 +272,78 @@ namespace People.Winforms
             }
         }
 
+        private void ClearInputs()
+        {
+            txtName.Clear();
+            txtSurname.Clear();
+            dtpDOB.Value = DateTime.Today;
+            lblAgeValue.Text = "";
+
+            listViewPeople.SelectedItems.Clear();
+            _currentSelectedPersonId = null;
+
+            txtName.BackColor = SystemColors.Window;
+            txtSurname.BackColor = SystemColors.Window;
+            dtpDOB.CalendarMonthBackground = SystemColors.Window;
+        }
+
+        private bool ValidateInputs()
+        {
+            bool isValid = true;
+            txtName.BackColor = SystemColors.Window;
+            txtSurname.BackColor = SystemColors.Window;
+            dtpDOB.CalendarMonthBackground = SystemColors.Window;
+
+            if (string.IsNullOrWhiteSpace(txtName.Text))
+            {
+                txtName.BackColor = Color.LightCoral;
+                MessageBox.Show("Name cannot be empty.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtName.Focus();
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(txtSurname.Text))
+            {
+                txtSurname.BackColor = Color.LightCoral;
+                MessageBox.Show("Surname cannot be empty.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtSurname.Focus();
+                return false;
+            }
+
+            if (dtpDOB.Value.Date > DateTime.Today)
+            {
+                dtpDOB.CalendarMonthBackground = Color.LightCoral;
+                MessageBox.Show("Date of Birth cannot be in the future.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                dtpDOB.Focus();
+                return false;
+            }
+
+            return isValid;
+        }
+
+        private void dtpDOB_ValueChanged(object sender, EventArgs e)
+        {
+            UpdateAgeLabel(dtpDOB.Value.Date);
+        }
+
+        private void UpdateAgeLabel(DateTime dob)
+        {
+            if (dob > DateTime.Today)
+            {
+                lblAgeValue.Text = "";
+                return;
+            }
+
+            int age = DateTime.Today.Year - dob.Year;
+            if (dob > DateTime.Today.AddYears(-age)) age--;
+            lblAgeValue.Text = age < 0 ? "" : age.ToString();
+        }
+
+        // Create, Update, Delete unchanged except using lblAgeValue.Text for age
         private async void btnCreate_Click(object sender, EventArgs e)
         {
+            if (!ValidateInputs()) return;
+
             try
             {
                 var list = await _client.ListAsync(new People.Protos.Empty());
@@ -164,9 +351,8 @@ namespace People.Winforms
                 bool duplicateExists = list.People.Any(p =>
                     p.Name.Equals(txtName.Text.Trim(), StringComparison.OrdinalIgnoreCase) &&
                     p.Surname.Equals(txtSurname.Text.Trim(), StringComparison.OrdinalIgnoreCase) &&
-                    p.Age == int.Parse(numAge.Text) &&
-                    p.DateOfBirth == dtpDOB.Value.ToString("yyyy-MM-dd")
-                );
+                    p.Age.ToString() == lblAgeValue.Text &&
+                    p.DateOfBirth == dtpDOB.Value.ToString("yyyy-MM-dd"));
 
                 if (duplicateExists)
                 {
@@ -175,15 +361,23 @@ namespace People.Winforms
                     return;
                 }
 
-                var person = new Person
+                var person = new People.Protos.Person
                 {
                     Name = txtName.Text.Trim(),
                     Surname = txtSurname.Text.Trim(),
-                    Age = int.Parse(numAge.Text),
+                    Age = int.Parse(lblAgeValue.Text),
                     DateOfBirth = dtpDOB.Value.ToString("yyyy-MM-dd")
                 };
 
                 var created = await _client.CreateAsync(person);
+
+                undoStack.Push(new PersonAction
+                {
+                    ActionType = ActionType.Create,
+                    PersonAfter = ClonePerson(created)
+                });
+                redoStack.Clear();
+
                 MessageBox.Show($"Created person with ID: {created.Id}");
                 await LoadPeopleAsync();
                 ClearInputs();
@@ -194,25 +388,28 @@ namespace People.Winforms
             }
         }
 
+
         private async void btnUpdate_Click(object sender, EventArgs e)
         {
+            if (!ValidateInputs()) return;
+
             try
             {
-                var id = _currentSelectedPersonId;
-                if (!id.HasValue)
+                if (!_currentSelectedPersonId.HasValue)
                 {
                     MessageBox.Show("No person selected.");
                     return;
                 }
 
+                var id = _currentSelectedPersonId.Value;
                 var name = txtName.Text.Trim();
                 var surname = txtSurname.Text.Trim();
-                var age = int.Parse(numAge.Text);
+                var age = int.Parse(lblAgeValue.Text);
                 var dob = dtpDOB.Value.ToString("yyyy-MM-dd");
 
                 var list = await _client.ListAsync(new People.Protos.Empty());
+                var originalPerson = list.People.FirstOrDefault(p => p.Id == id);
 
-                var originalPerson = list.People.FirstOrDefault(p => p.Id == id.Value);
                 if (originalPerson == null)
                 {
                     MessageBox.Show("Person not found.");
@@ -229,7 +426,7 @@ namespace People.Winforms
                 }
 
                 bool duplicateExists = list.People.Any(p =>
-                    p.Id != id.Value &&
+                    p.Id != id &&
                     p.Name.Equals(name, StringComparison.OrdinalIgnoreCase) &&
                     p.Surname.Equals(surname, StringComparison.OrdinalIgnoreCase) &&
                     p.Age == age &&
@@ -242,17 +439,27 @@ namespace People.Winforms
                     return;
                 }
 
-                var person = new Person
+                var personBefore = ClonePerson(originalPerson);
+                var personAfter = new People.Protos.Person
                 {
-                    Id = id.Value,
+                    Id = id,
                     Name = name,
                     Surname = surname,
                     Age = age,
                     DateOfBirth = dob
                 };
 
-                var result = await _client.UpdateAsync(person);
+                var result = await _client.UpdateAsync(personAfter);
                 MessageBox.Show(result.Message);
+
+                undoStack.Push(new PersonAction
+                {
+                    ActionType = ActionType.Update,
+                    PersonBefore = personBefore,
+                    PersonAfter = ClonePerson(personAfter)
+                });
+                redoStack.Clear();
+
                 await LoadPeopleAsync();
                 ClearInputs();
             }
@@ -262,11 +469,13 @@ namespace People.Winforms
             }
         }
 
+
+
         private async void btnDelete_Click(object sender, EventArgs e)
         {
             try
             {
-                if (_currentSelectedPersonId == null)
+                if (!_currentSelectedPersonId.HasValue)
                 {
                     MessageBox.Show("No person selected.");
                     return;
@@ -276,8 +485,27 @@ namespace People.Winforms
                     return;
 
                 var id = _currentSelectedPersonId.Value;
-                var result = await _client.DeleteAsync(new Id { Id_ = id });
+
+                var list = await _client.ListAsync(new People.Protos.Empty());
+                var personToDelete = list.People.FirstOrDefault(p => p.Id == id);
+                if (personToDelete == null)
+                {
+                    MessageBox.Show("Person not found.");
+                    return;
+                }
+
+                var before = ClonePerson(personToDelete);
+
+                var result = await _client.DeleteAsync(new People.Protos.Id { Id_ = id });
                 MessageBox.Show(result.Message);
+
+                undoStack.Push(new PersonAction
+                {
+                    ActionType = ActionType.Delete,
+                    PersonBefore = before
+                });
+                redoStack.Clear();
+
                 await LoadPeopleAsync();
                 ClearInputs();
             }
@@ -287,22 +515,441 @@ namespace People.Winforms
             }
         }
 
-        private void dtpDOB_ValueChanged(object sender, EventArgs e)
+
+        private void clearFields_Click(object sender, EventArgs e)
         {
-            var today = DateTime.Today;
-            var dob = dtpDOB.Value;
+            ClearInputs();
+        }
 
-            int age = today.Year - dob.Year;
-            if (dob > today.AddYears(-age)) age--;
+        private void Form1_Resize(object sender, EventArgs e)
+        {
+            listViewPeople.Size = new Size(ClientSize.Width - 350, ClientSize.Height - 80);
+            txtSearchSurname.Size = new Size(ClientSize.Width - 470, 23);
 
-            // Check if age is within valid range for numAge dropdown (1 to 100)
-            if (age < 1)
-                age = 1;
-            else if (age > 100)
-                age = 100;
+            btnCreate.Location = new Point(6, ClientSize.Height - 40);
+            btnUpdate.Location = new Point(122, ClientSize.Height - 40);
+            btnDelete.Location = new Point(232, ClientSize.Height - 40);
+            clearFields.Location = new Point(100, ClientSize.Height - 40);
+            btnToggleTheme.Location = new Point(ClientSize.Width - 87, ClientSize.Height - 40);
+        }
 
-            numAge.SelectedIndex = age - 1;  // since SelectedIndex is zero-based and age is 1-based
+        private void txtName_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            // Allow control keys like backspace
+            if (!char.IsControl(e.KeyChar) && !char.IsLetter(e.KeyChar))
+            {
+                e.Handled = true; // Block the input
+            }
+        }
+
+        private void txtSurname_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            // Allow control keys like backspace
+            if (!char.IsControl(e.KeyChar) && !char.IsLetter(e.KeyChar))
+            {
+                e.Handled = true; // Block the input
+            }
+        }
+        private void StyleButton(Button btn, Color normalBack, Color hoverBack)
+        {
+            btn.BackColor = normalBack;
+            btn.ForeColor = Color.White;
+            btn.FlatStyle = FlatStyle.Flat;
+
+            btn.MouseEnter += (s, e) => { btn.BackColor = hoverBack; };
+            btn.MouseLeave += (s, e) => { btn.BackColor = normalBack; };
+        }
+        private void ApplyButtonStyles()
+        {
+            StyleButton(btnCreate, Color.MediumSeaGreen, Color.SeaGreen);
+            StyleButton(btnUpdate, Color.DodgerBlue, Color.RoyalBlue);
+            StyleButton(btnDelete, Color.IndianRed, Color.Firebrick);
+            StyleButton(clearFields, Color.Orange, Color.DarkOrange);
+            StyleButton(btnToggleTheme, Color.Gray, Color.DimGray);
+            StyleButton(btnExport, Color.MediumPurple, Color.DarkMagenta);
+            StyleButton(btnImport, Color.MediumSlateBlue, Color.SlateBlue);
+        }
+
+        private async void btnExport_Click(object sender, EventArgs e)
+        {
+            if (listViewPeople.Items.Count == 0)
+            {
+                MessageBox.Show("No data to export.", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using (SaveFileDialog sfd = new SaveFileDialog())
+            {
+                sfd.Filter = "CSV files (*.csv)|*.csv|Excel files (*.xlsx)|*.xlsx";
+                sfd.Title = "Export People";
+
+                if (sfd.ShowDialog() != DialogResult.OK) return;
+
+                try
+                {
+                    if (sfd.FileName.EndsWith(".csv"))
+                    {
+                        await ExportToCsvAsync(sfd.FileName);
+                    }
+                    else if (sfd.FileName.EndsWith(".xlsx"))
+                    {
+                        ExportToExcel(sfd.FileName);
+                    }
+
+                    MessageBox.Show("Export successful!", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Export failed: " + ex.Message, "Export", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private async Task ExportToCsvAsync(string filePath)
+        {
+            var lines = new List<string>();
+            // Header
+            lines.Add("Id,Name,Surname,Age,DateOfBirth");
+
+            // Rows
+            foreach (ListViewItem item in listViewPeople.Items)
+            {
+                string[] values = item.SubItems.Cast<ListViewItem.ListViewSubItem>()
+                                    .Select(s => s.Text.Contains(",") ? $"\"{s.Text}\"" : s.Text)
+                                    .ToArray();
+                lines.Add(string.Join(",", values));
+            }
+
+            await File.WriteAllLinesAsync(filePath, lines);
+        }
+
+        private void ExportToExcel(string filePath)
+        {
+            using (var workbook = new ClosedXML.Excel.XLWorkbook())
+            {
+                var ws = workbook.Worksheets.Add("People");
+
+                // Header
+                for (int c = 0; c < listViewPeople.Columns.Count; c++)
+                {
+                    ws.Cell(1, c + 1).Value = listViewPeople.Columns[c].Text;
+                }
+
+                // Rows
+                for (int r = 0; r < listViewPeople.Items.Count; r++)
+                {
+                    var item = listViewPeople.Items[r];
+                    for (int c = 0; c < item.SubItems.Count; c++)
+                    {
+                        ws.Cell(r + 2, c + 1).Value = item.SubItems[c].Text;
+                    }
+                }
+
+                workbook.SaveAs(filePath);
+            }
+        }
+
+        private async void btnImport_Click(object sender, EventArgs e)
+        {
+            using (OpenFileDialog ofd = new OpenFileDialog())
+            {
+                ofd.Filter = "CSV files (*.csv)|*.csv|Excel files (*.xlsx)|*.xlsx";
+                ofd.Title = "Import People";
+
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+
+                try
+                {
+                    List<Person> peopleToImport = new List<Person>();
+
+                    if (ofd.FileName.EndsWith(".csv"))
+                        peopleToImport = await ReadCsvAsync(ofd.FileName);
+                    else if (ofd.FileName.EndsWith(".xlsx"))
+                        peopleToImport = ReadExcel(ofd.FileName);
+
+                    var existingPeople = await _client.ListAsync(new People.Protos.Empty());
+
+                    var duplicates = peopleToImport.Where(p =>
+                        existingPeople.People.Any(x =>
+                            x.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase) &&
+                            x.Surname.Equals(p.Surname, StringComparison.OrdinalIgnoreCase) &&
+                            x.Age == p.Age &&
+                            x.DateOfBirth == p.DateOfBirth)).ToList();
+
+                    var toAdd = peopleToImport.Except(duplicates).ToList();
+
+                    if (toAdd.Count == 0)
+                    {
+                        MessageBox.Show("No new people to add. All rows are duplicates.");
+                        return;
+                    }
+
+                    var preview = new ImportPreviewForm(toAdd, duplicates);
+                    if (preview.ShowDialog() != DialogResult.OK) return;
+
+                    int importedCount = 0;
+                    foreach (var p in toAdd)
+                    {
+                        await _client.CreateAsync(p);
+                        importedCount++;
+                    }
+
+                    await LoadPeopleAsync();
+                    MessageBox.Show($"Import finished. Imported: {importedCount}, Duplicates skipped: {duplicates.Count}");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Import failed: " + ex.Message);
+                }
+            }
+        }
+
+        private async Task<List<Person>> ReadCsvAsync(string filePath)
+        {
+            var lines = await File.ReadAllLinesAsync(filePath);
+            var people = new List<Person>();
+
+            for (int i = 1; i < lines.Length; i++) // skip header
+            {
+                var columns = lines[i].Split(',');
+
+                if (columns.Length < 5) continue; // invalid row
+
+                if (!int.TryParse(columns[3], out int age)) continue;
+                if (!DateTime.TryParse(columns[4], out DateTime dob)) continue;
+
+                people.Add(new Person
+                {
+                    Name = columns[1].Trim(),
+                    Surname = columns[2].Trim(),
+                    Age = age,
+                    DateOfBirth = dob.ToString("yyyy-MM-dd")
+                });
+            }
+
+            return people;
+        }
+        private List<Person> ReadExcel(string filePath)
+        {
+            var people = new List<Person>();
+            using (var workbook = new ClosedXML.Excel.XLWorkbook(filePath))
+            {
+                var ws = workbook.Worksheets.First();
+
+                foreach (var row in ws.RowsUsed().Skip(1)) // skip header
+                {
+                    string name = row.Cell(2).GetString().Trim();
+                    string surname = row.Cell(3).GetString().Trim();
+
+                    if (!int.TryParse(row.Cell(4).GetString(), out int age)) continue;
+                    if (!DateTime.TryParse(row.Cell(5).GetString(), out DateTime dob)) continue;
+
+                    people.Add(new Person
+                    {
+                        Name = name,
+                        Surname = surname,
+                        Age = age,
+                        DateOfBirth = dob.ToString("yyyy-MM-dd")
+                    });
+                }
+            }
+            return people;
+        }
+
+        private void UpdateListViewColumns()
+        {
+            var t = isGreek ? Translations.Greek : Translations.English;
+
+            listViewPeople.Columns.Clear();
+            listViewPeople.Columns.Add(t["Name"], 150);
+            listViewPeople.Columns.Add(t["Surname"], 150);
+            listViewPeople.Columns.Add(t["Age"], 80);
+            listViewPeople.Columns.Add(t["DOB"], 150);
+        }
+
+        private async void btnUndo_Click(object sender, EventArgs e)
+        {
+            if (undoStack.Count == 0)
+            {
+                MessageBox.Show("Nothing to undo.");
+                return;
+            }
+
+            var action = undoStack.Pop();
+
+            try
+            {
+                switch (action.ActionType)
+                {
+                    case ActionType.Create:
+                        {
+                            if (action.PersonAfter != null)
+                            {
+                                await _client.DeleteAsync(new People.Protos.Id { Id_ = action.PersonAfter.Id });
+                            }
+                            redoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Update:
+                        {
+                            if (action.PersonBefore != null)
+                            {
+                                await _client.UpdateAsync(ClonePerson(action.PersonBefore));
+                            }
+                            redoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Delete:
+                        {
+                            if (action.PersonBefore != null)
+                            {
+                                var recreated = await _client.CreateAsync(new People.Protos.Person
+                                {
+                                    Name = action.PersonBefore.Name,
+                                    Surname = action.PersonBefore.Surname,
+                                    Age = action.PersonBefore.Age,
+                                    DateOfBirth = action.PersonBefore.DateOfBirth
+                                });
+
+                                action.PersonBefore.Id = recreated.Id;
+                            }
+                            redoStack.Push(action);
+                            break;
+                        }
+                }
+
+                await LoadPeopleAsync();
+                ClearInputs();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Undo error: " + ex.Message);
+            }
+        }
+
+
+
+        private async void btnRedo_Click(object sender, EventArgs e)
+        {
+            if (redoStack.Count == 0)
+            {
+                MessageBox.Show("Nothing to redo.");
+                return;
+            }
+
+            var action = redoStack.Pop();
+
+            try
+            {
+                switch (action.ActionType)
+                {
+                    case ActionType.Create:
+                        {
+                            if (action.PersonAfter != null)
+                            {
+                                var recreated = await _client.CreateAsync(new People.Protos.Person
+                                {
+                                    Name = action.PersonAfter.Name,
+                                    Surname = action.PersonAfter.Surname,
+                                    Age = action.PersonAfter.Age,
+                                    DateOfBirth = action.PersonAfter.DateOfBirth
+                                });
+
+                                action.PersonAfter.Id = recreated.Id;
+                            }
+                            undoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Update:
+                        {
+                            if (action.PersonAfter != null)
+                            {
+                                await _client.UpdateAsync(ClonePerson(action.PersonAfter));
+                            }
+                            undoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Delete:
+                        {
+                            if (action.PersonBefore != null)
+                            {
+                                await _client.DeleteAsync(new People.Protos.Id { Id_ = action.PersonBefore.Id });
+                            }
+                            undoStack.Push(action);
+                            break;
+                        }
+                }
+
+                await LoadPeopleAsync();
+                ClearInputs();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Redo error: " + ex.Message);
+            }
+        }
+
+
+        private void btnLanguage_Click(object sender, EventArgs e)
+        {
+            isGreek = !isGreek;
+            var t = isGreek ? Translations.Greek : Translations.English;
+
+            // Δημιουργούμε ένα λεξικό από τα controls και τα αντίστοιχα keys
+            var translationsMap = new Dictionary<Control, string>
+            {
+                { lblName, "Name" },
+                { lblSurname, "Surname" },
+                { lblAge, "Age" },
+                { lblDOB, "DOB" },
+                { btnCreate, "Create" },
+                { btnUpdate, "Update" },
+                { btnDelete, "Delete" },
+                { clearFields, "Clear" },
+                { btnToggleTheme, "DarkMode" },
+                { btnLanguage, "SwitchLanguage" },
+                { label1, "SearchLabel" },
+                { rbSearchByName, "SearchByName" },
+                { rbSearchBySurname, "SearchBySurname" },
+                { btnExport, "Export" },
+                { btnImport, "Import" }
+            };
+
+            // Ενημερώνουμε όλα τα controls
+            foreach (var pair in translationsMap)
+            {
+                pair.Key.Text = t[pair.Value];
+            }
+
+            // Ενημέρωση ListView columns
+            if (listViewPeople.Columns.Count >= 4)
+            {
+                listViewPeople.Columns[0].Text = t["Name"];
+                listViewPeople.Columns[1].Text = t["Surname"];
+                listViewPeople.Columns[2].Text = t["Age"];
+                listViewPeople.Columns[3].Text = t["DOB"];
+            }
+        }
+
+
+        private static People.Protos.Person ClonePerson(People.Protos.Person p)
+        {
+            if (p == null) return null;
+            return new People.Protos.Person
+            {
+                Id = p.Id,
+                Name = p.Name,
+                Surname = p.Surname,
+                Age = p.Age,
+                DateOfBirth = p.DateOfBirth
+            };
         }
 
     }
+
+
 }

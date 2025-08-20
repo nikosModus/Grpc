@@ -2,21 +2,34 @@ syntax = "proto3";
 
 option csharp_namespace = "People.Protos";
 
-package people;
-
-message Person {
-  int64 id = 1;
-  string name = 2;
-  string surname = 3;
-  int32 age = 4;
-  string dateOfBirth = 5;
-}
-
-message Id { int64 id = 1; }
 message Empty {}
 
-message PersonList { repeated Person people = 1; }
-message OperationResult { bool success = 1; string message = 2; }
+message Id {
+  int64 Id_ = 1;
+}
+
+message Person {
+  int64 Id = 1;
+  string Name = 2;
+  string Surname = 3;
+  int32 Age = 4;
+  string DateOfBirth = 5;
+}
+
+message OperationResult {
+  bool Success = 1;
+  string Message = 2;
+}
+
+message PersonList {
+  repeated Person People = 1;
+}
+
+// <-- add this
+message SearchRequest {
+  string Query = 1;    // the text to search
+  bool ByName = 2;     // true=search by Name, false=search by Surname
+}
 
 service PersonService {
   rpc Create(Person) returns (Person);
@@ -24,4 +37,5 @@ service PersonService {
   rpc Update(Person) returns (OperationResult);
   rpc Delete(Id) returns (OperationResult);
   rpc List(Empty) returns (PersonList);
+  rpc Search(SearchRequest) returns (PersonList); // <-- add this
 }
