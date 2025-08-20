@@ -20,11 +20,13 @@ namespace People.Winforms
             { "SearchBySurname", "Search by Surname" },
             { "Export", "Export As..." },
             { "Import", "Import..." },
-            { "SwitchLanguage", "Greek" }
+            { "SwitchLanguage", "Greek" },
+            { "Undo", "Undo" },
+            { "Redo", "Redo" },
 
         };
 
-        public static readonly Dictionary<string, string> Greek = new()
+        public static Dictionary<string, string> Greek = new Dictionary<string, string>
         {
             { "Name", "Όνομα" },
             { "Surname", "Επώνυμο" },
@@ -35,13 +37,16 @@ namespace People.Winforms
             { "Delete", "Διαγραφή" },
             { "Clear", "Καθαρισμός" },
             { "DarkMode", "Σκούρο Θέμα" },
-            { "SearchLabel", "Αναζήτηση" },
-            { "SearchByName", "Με Όνομα" },
-            { "SearchBySurname", "Με Επώνυμο" },
+            { "SwitchLanguage", "Αγγλικά" },
+            { "SearchLabel", "Αναζήτηση με Επώνυμο" },
+            { "SearchByName", "Αναζήτηση με Όνομα" },
+            { "SearchBySurname", "Αναζήτηση με Επώνυμο" },
             { "Export", "Εξαγωγή" },
             { "Import", "Εισαγωγή" },
-            { "SwitchLanguage", "Αγγλικά" },
+            { "Undo", "Αναίρεση" },
+            { "Redo", "Επανάληψη" },
 
         };
+
     }
 }

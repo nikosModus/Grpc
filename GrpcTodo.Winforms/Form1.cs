@@ -13,9 +13,11 @@ namespace People.Winforms
     {
         private Dictionary<long, Person> _personMap = new Dictionary<long, Person>();
         private PersonService.PersonServiceClient _client;
-
         private long? _currentSelectedPersonId = null;
         private bool darkMode = false;
+        //stacks for undo / redo
+        private readonly Stack<PersonAction> undoStack = new Stack<PersonAction>();
+        private readonly Stack<PersonAction> redoStack = new Stack<PersonAction>();
 
         //for user management
         private string _role;
@@ -79,6 +81,8 @@ namespace People.Winforms
 
         private async void Form1_Load(object sender, EventArgs e)
         {
+            UpdateListViewColumns();
+
             try
             {
                 // Load your people list after form is ready
@@ -155,6 +159,8 @@ namespace People.Winforms
             darkMode = !darkMode;
             ApplyTheme();
         }
+
+
 
         private async Task<List<Person>> LoadPeopleAsync(string? filterText = null)
         {
@@ -346,8 +352,7 @@ namespace People.Winforms
                     p.Name.Equals(txtName.Text.Trim(), StringComparison.OrdinalIgnoreCase) &&
                     p.Surname.Equals(txtSurname.Text.Trim(), StringComparison.OrdinalIgnoreCase) &&
                     p.Age.ToString() == lblAgeValue.Text &&
-                    p.DateOfBirth == dtpDOB.Value.ToString("yyyy-MM-dd")
-                );
+                    p.DateOfBirth == dtpDOB.Value.ToString("yyyy-MM-dd"));
 
                 if (duplicateExists)
                 {
@@ -356,7 +361,7 @@ namespace People.Winforms
                     return;
                 }
 
-                var person = new Person
+                var person = new People.Protos.Person
                 {
                     Name = txtName.Text.Trim(),
                     Surname = txtSurname.Text.Trim(),
@@ -365,6 +370,14 @@ namespace People.Winforms
                 };
 
                 var created = await _client.CreateAsync(person);
+
+                undoStack.Push(new PersonAction
+                {
+                    ActionType = ActionType.Create,
+                    PersonAfter = ClonePerson(created)
+                });
+                redoStack.Clear();
+
                 MessageBox.Show($"Created person with ID: {created.Id}");
                 await LoadPeopleAsync();
                 ClearInputs();
@@ -374,6 +387,7 @@ namespace People.Winforms
                 MessageBox.Show("Create error: " + ex.Message);
             }
         }
+
 
         private async void btnUpdate_Click(object sender, EventArgs e)
         {
@@ -416,8 +430,7 @@ namespace People.Winforms
                     p.Name.Equals(name, StringComparison.OrdinalIgnoreCase) &&
                     p.Surname.Equals(surname, StringComparison.OrdinalIgnoreCase) &&
                     p.Age == age &&
-                    p.DateOfBirth == dob
-                );
+                    p.DateOfBirth == dob);
 
                 if (duplicateExists)
                 {
@@ -426,7 +439,8 @@ namespace People.Winforms
                     return;
                 }
 
-                var person = new Person
+                var personBefore = ClonePerson(originalPerson);
+                var personAfter = new People.Protos.Person
                 {
                     Id = id,
                     Name = name,
@@ -435,8 +449,17 @@ namespace People.Winforms
                     DateOfBirth = dob
                 };
 
-                var result = await _client.UpdateAsync(person);
+                var result = await _client.UpdateAsync(personAfter);
                 MessageBox.Show(result.Message);
+
+                undoStack.Push(new PersonAction
+                {
+                    ActionType = ActionType.Update,
+                    PersonBefore = personBefore,
+                    PersonAfter = ClonePerson(personAfter)
+                });
+                redoStack.Clear();
+
                 await LoadPeopleAsync();
                 ClearInputs();
             }
@@ -445,6 +468,8 @@ namespace People.Winforms
                 MessageBox.Show("Update error: " + ex.Message);
             }
         }
+
+
 
         private async void btnDelete_Click(object sender, EventArgs e)
         {
@@ -460,8 +485,27 @@ namespace People.Winforms
                     return;
 
                 var id = _currentSelectedPersonId.Value;
-                var result = await _client.DeleteAsync(new Id { Id_ = id });
+
+                var list = await _client.ListAsync(new People.Protos.Empty());
+                var personToDelete = list.People.FirstOrDefault(p => p.Id == id);
+                if (personToDelete == null)
+                {
+                    MessageBox.Show("Person not found.");
+                    return;
+                }
+
+                var before = ClonePerson(personToDelete);
+
+                var result = await _client.DeleteAsync(new People.Protos.Id { Id_ = id });
                 MessageBox.Show(result.Message);
+
+                undoStack.Push(new PersonAction
+                {
+                    ActionType = ActionType.Delete,
+                    PersonBefore = before
+                });
+                redoStack.Clear();
+
                 await LoadPeopleAsync();
                 ClearInputs();
             }
@@ -470,6 +514,7 @@ namespace People.Winforms
                 MessageBox.Show("Delete error: " + ex.Message);
             }
         }
+
 
         private void clearFields_Click(object sender, EventArgs e)
         {
@@ -711,26 +756,200 @@ namespace People.Winforms
             return people;
         }
 
+        private void UpdateListViewColumns()
+        {
+            var t = isGreek ? Translations.Greek : Translations.English;
+
+            listViewPeople.Columns.Clear();
+            listViewPeople.Columns.Add(t["Name"], 150);
+            listViewPeople.Columns.Add(t["Surname"], 150);
+            listViewPeople.Columns.Add(t["Age"], 80);
+            listViewPeople.Columns.Add(t["DOB"], 150);
+        }
+
+        private async void btnUndo_Click(object sender, EventArgs e)
+        {
+            if (undoStack.Count == 0)
+            {
+                MessageBox.Show("Nothing to undo.");
+                return;
+            }
+
+            var action = undoStack.Pop();
+
+            try
+            {
+                switch (action.ActionType)
+                {
+                    case ActionType.Create:
+                        {
+                            if (action.PersonAfter != null)
+                            {
+                                await _client.DeleteAsync(new People.Protos.Id { Id_ = action.PersonAfter.Id });
+                            }
+                            redoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Update:
+                        {
+                            if (action.PersonBefore != null)
+                            {
+                                await _client.UpdateAsync(ClonePerson(action.PersonBefore));
+                            }
+                            redoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Delete:
+                        {
+                            if (action.PersonBefore != null)
+                            {
+                                var recreated = await _client.CreateAsync(new People.Protos.Person
+                                {
+                                    Name = action.PersonBefore.Name,
+                                    Surname = action.PersonBefore.Surname,
+                                    Age = action.PersonBefore.Age,
+                                    DateOfBirth = action.PersonBefore.DateOfBirth
+                                });
+
+                                action.PersonBefore.Id = recreated.Id;
+                            }
+                            redoStack.Push(action);
+                            break;
+                        }
+                }
+
+                await LoadPeopleAsync();
+                ClearInputs();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Undo error: " + ex.Message);
+            }
+        }
+
+
+
+        private async void btnRedo_Click(object sender, EventArgs e)
+        {
+            if (redoStack.Count == 0)
+            {
+                MessageBox.Show("Nothing to redo.");
+                return;
+            }
+
+            var action = redoStack.Pop();
+
+            try
+            {
+                switch (action.ActionType)
+                {
+                    case ActionType.Create:
+                        {
+                            if (action.PersonAfter != null)
+                            {
+                                var recreated = await _client.CreateAsync(new People.Protos.Person
+                                {
+                                    Name = action.PersonAfter.Name,
+                                    Surname = action.PersonAfter.Surname,
+                                    Age = action.PersonAfter.Age,
+                                    DateOfBirth = action.PersonAfter.DateOfBirth
+                                });
+
+                                action.PersonAfter.Id = recreated.Id;
+                            }
+                            undoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Update:
+                        {
+                            if (action.PersonAfter != null)
+                            {
+                                await _client.UpdateAsync(ClonePerson(action.PersonAfter));
+                            }
+                            undoStack.Push(action);
+                            break;
+                        }
+
+                    case ActionType.Delete:
+                        {
+                            if (action.PersonBefore != null)
+                            {
+                                await _client.DeleteAsync(new People.Protos.Id { Id_ = action.PersonBefore.Id });
+                            }
+                            undoStack.Push(action);
+                            break;
+                        }
+                }
+
+                await LoadPeopleAsync();
+                ClearInputs();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Redo error: " + ex.Message);
+            }
+        }
+
+
         private void btnLanguage_Click(object sender, EventArgs e)
         {
             isGreek = !isGreek;
             var t = isGreek ? Translations.Greek : Translations.English;
 
-            lblName.Text = t["Name"];
-            lblSurname.Text = t["Surname"];
-            lblAge.Text = t["Age"];
-            lblDOB.Text = t["DOB"];
-            btnCreate.Text = t["Create"];
-            btnUpdate.Text = t["Update"];
-            btnDelete.Text = t["Delete"];
-            clearFields.Text = t["Clear"];
-            btnToggleTheme.Text = t["DarkMode"];
-            btnLanguage.Text = t["SwitchLanguage"];
-            label1.Text = t["SearchLabel"];
-            rbSearchByName.Text = t["SearchByName"];
-            rbSearchBySurname.Text = t["SearchBySurname"];
-            btnExport.Text = t["Export"];
-            btnImport.Text = t["Import"];
+            // Δημιουργούμε ένα λεξικό από τα controls και τα αντίστοιχα keys
+            var translationsMap = new Dictionary<Control, string>
+            {
+                { lblName, "Name" },
+                { lblSurname, "Surname" },
+                { lblAge, "Age" },
+                { lblDOB, "DOB" },
+                { btnCreate, "Create" },
+                { btnUpdate, "Update" },
+                { btnDelete, "Delete" },
+                { clearFields, "Clear" },
+                { btnToggleTheme, "DarkMode" },
+                { btnLanguage, "SwitchLanguage" },
+                { label1, "SearchLabel" },
+                { rbSearchByName, "SearchByName" },
+                { rbSearchBySurname, "SearchBySurname" },
+                { btnExport, "Export" },
+                { btnImport, "Import" }
+            };
+
+            // Ενημερώνουμε όλα τα controls
+            foreach (var pair in translationsMap)
+            {
+                pair.Key.Text = t[pair.Value];
+            }
+
+            // Ενημέρωση ListView columns
+            if (listViewPeople.Columns.Count >= 4)
+            {
+                listViewPeople.Columns[0].Text = t["Name"];
+                listViewPeople.Columns[1].Text = t["Surname"];
+                listViewPeople.Columns[2].Text = t["Age"];
+                listViewPeople.Columns[3].Text = t["DOB"];
+            }
         }
+
+
+        private static People.Protos.Person ClonePerson(People.Protos.Person p)
+        {
+            if (p == null) return null;
+            return new People.Protos.Person
+            {
+                Id = p.Id,
+                Name = p.Name,
+                Surname = p.Surname,
+                Age = p.Age,
+                DateOfBirth = p.DateOfBirth
+            };
+        }
+
     }
+
+
 }
